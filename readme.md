@@ -1,192 +1,115 @@
-# Shiroi Docker Deploy Workflow
+# Shiroi Dokploy Deploy
 
-这是一个利用 GitHub Action 构建 Shiroi Docker 镜像并部署到远程服务器的工作流。
+使用 GitHub Actions 构建 Shiroi Docker 镜像并通过 Dokploy 部署。
 
-## Why?
+## 为什么？
 
 Shiroi 是 [Shiro](https://github.com/Innei/Shiro) 的闭源开发版本。
 
-开源版本提供了预构建的 Docker 镜像或者编译产物可直接使用，但是闭源版本并没有提供。
+由于 Next.js 构建需要大量内存，很多服务器无法承受这样的开销。此项目利用 GitHub Actions 构建 Docker 镜像，推送到 GitHub Container Registry (GHCR) 私有仓库，然后通过 Dokploy API 触发部署。
 
-因为 Next.js build 需要大量内存，很多服务器并吃不消这样的开销。
-
-因此这里提供利用 GitHub Action 去构建 Docker 镜像然后推送到服务器，使用 Docker 容器化部署。
-
-你可以使用定时任务去定时更新 Shiroi。
-
-## How to
-
-开始之前，你的服务器首先需要安装 Docker。
-
-Fork 此项目，然后你需要填写下面的信息。
-
-## 服务器准备
-
-#### 1. 安装 Docker
-
-确保你的服务器已经安装了 Docker：
-
-```bash
-# Ubuntu/Debian
-sudo apt update
-sudo apt install docker.io docker-compose
-
-# CentOS/RHEL
-sudo yum install docker docker-compose
-
-# 启动 Docker 服务
-sudo systemctl start docker
-sudo systemctl enable docker
-
-# 将用户添加到 docker 组（可选，避免每次使用 sudo）
-sudo usermod -aG docker $USER
-```
-
-#### 2. 准备配置文件
-
-在服务器上创建必要的目录和配置文件：
-
-```bash
-# 创建项目目录
-mkdir -p $HOME/shiroi/{data,logs}
-
-# 创建环境变量文件
-touch $HOME/shiroi/.env
-```
-
-编辑 `$HOME/shiroi/.env` 文件，添加 Shiroi 所需的环境变量（参考 `shiroi.env.example` 文件）：
-
-## Secrets
-
-在 GitHub 仓库的 Settings > Secrets and variables > Actions 中添加以下 secrets：
-
-- `HOST` - 服务器地址
-- `USER` - 服务器用户名
-- `PASSWORD` - 服务器密码
-- `PORT` - 服务器 SSH 端口（默认 22）
-- `KEY` - 服务器 SSH Key（可选，与密码二选一）
-- `GH_PAT` - 可访问 Shiroi 仓库的 Github Token
-- `AFTER_DEPLOY_SCRIPT` - 部署后执行的脚本（可选）
-
-### Github Token
-
-1. 你的账号可以访问 Shiroi 仓库。
-2. 进入 [tokens](https://github.com/settings/tokens) - Personal access tokens - Tokens (classic) - Generate new token - Generate new token (classic)
-3. 选择适当的权限范围，至少需要 `repo` 权限来访问私有仓库。
-
-![](https://github.com/innei-dev/shiroi-deploy-action/assets/41265413/e55d32cb-bd30-46b7-a603-7d00b3f8a413)
-
-## 工作流程说明
-
-1. **准备阶段**：读取当前构建哈希
-2. **检查阶段**：对比远程仓库最新提交，判断是否需要重新构建
-3. **构建阶段**：
-   - 检出 Shiroi 源码
-   - 使用 Docker Buildx 构建镜像
-   - 将镜像保存为 tar 文件
-   - 上传为 GitHub artifact
-4. **部署阶段**：
-   - 下载构建的 Docker 镜像
-   - 通过 SCP 传输到远程服务器
-   - 在服务器上加载镜像
-   - 停止旧容器，启动新容器
-   - 清理旧镜像和临时文件
-5. **存储阶段**：更新构建哈希文件
-
-## 零停机部署方案
-
-本项目现在支持基于 Docker Compose 和 Nginx 反向代理的零停机蓝绿部署方案。
-
-### 架构设计
+## 工作流程
 
 ```
-外部访问 :12333 → Nginx → 蓝绿 NextJS 容器
-                         ├─ shiroi-blue:3001
-                         └─ shiroi-green:3002
+Shiroi 仓库 push
+       ↓
+GitHub Actions 构建镜像
+       ↓
+推送到 GHCR (私有)
+       ↓
+调用 Dokploy API 触发部署
+       ↓
+Dokploy 从 GHCR 拉取镜像并部署
 ```
 
-### 服务配置
+## 配置步骤
 
-- **外部端口**：
-  - `12333:2323` - 应用端口
-- **内部容器**：
-  - `shiroi-blue`: 端口 3001
-  - `shiroi-green`: 端口 3002
-- **数据持久化**：
-  - `$HOME/shiroi/data:/app/data` - 应用数据
-  - `$HOME/shiroi/logs:/app/logs` - 日志文件
-- **部署文件**：存储在 `$HOME/shiroi/deploy/`
+### 1. Dokploy 配置
 
-### 零停机部署流程
+#### 添加 GHCR Registry
 
-1. **首次部署**：自动启动所有服务
-2. **后续升级**：
-   - 启动新版本容器（蓝/绿切换）
-   - 健康检查新容器
-   - 更新 Nginx 配置切换流量
-   - 停止旧容器
-3. **回滚支持**：快速切换回上一版本
+在 Dokploy Dashboard → Settings → Registry → Add Registry：
 
-## 手动管理
+| 字段 | 值 |
+|------|-----|
+| Name | `ghcr` |
+| Registry URL | `ghcr.io` |
+| Username | 你的 GitHub 用户名 |
+| Password | GitHub PAT (需要 `read:packages` 权限) |
 
-### 零停机部署操作
+#### 创建 Application
 
-```bash
-# 切换到部署目录
-cd $HOME/shiroi/deploy
+1. 创建新的 Application，选择 **Docker** 类型
+2. 配置镜像：
+   - Registry: 选择刚才添加的 `ghcr`
+   - Image: `ghcr.io/<your-username>/shiroi`
+   - Tag: `latest`
+3. 配置环境变量（参考 Shiroi 文档）
+4. 配置端口映射、数据卷等
 
-# 部署新版本
-./deploy-zero-downtime.sh deploy shiroi:new-tag
+#### 获取 Application ID
 
-# 查看当前状态
-./deploy-zero-downtime.sh status
-
-# 回滚到上一版本
-./deploy-zero-downtime.sh rollback
-
-# 停止所有服务
-./deploy-zero-downtime.sh stop
-
-# 启动所有服务
-./deploy-zero-downtime.sh start
+从 Dokploy URL 中提取，例如：
+```
+https://dokploy.example.com/dashboard/project/.../services/application/hdoihUG0FmYC8GdoFEc
+                                                                      └─────────────────┘
+                                                                        这就是 App ID
 ```
 
-### 传统容器管理
+#### 生成 API Token
 
-```bash
-# 查看所有容器状态
-docker compose ps
+Dokploy Dashboard → Profile → Generate API Key
 
-# 查看容器日志
-docker compose logs shiroi-blue
-docker compose logs shiroi-green
-docker compose logs nginx
+### 2. GitHub Secrets 配置
 
-# 手动重启服务
-docker compose restart nginx
-docker compose restart shiroi-blue
+在此仓库的 Settings → Secrets and variables → Actions 中添加：
 
-# 清理旧镜像
-docker images shiroi
-docker rmi shiroi:old-tag  # 删除指定标签的镜像
-```
+| Secret | 说明 |
+|--------|------|
+| `GH_PAT` | 可访问 Shiroi 私有仓库的 GitHub Token (需要 `repo` 权限) |
+| `DOKPLOY_URL` | Dokploy 实例地址，如 `https://dokploy.example.com` (不带尾部斜杠) |
+| `DOKPLOY_API_TOKEN` | Dokploy 生成的 API Key |
+| `DOKPLOY_APP_ID` | Dokploy Application ID |
+| `AFTER_DEPLOY_SCRIPT` | (可选) 部署后执行的脚本 |
+
+### 3. 创建 GitHub PAT
+
+1. 进入 [GitHub Settings → Tokens](https://github.com/settings/tokens)
+2. Generate new token (classic)
+3. 选择权限：
+   - `repo` - 访问私有仓库
+   - `read:packages` - 读取 packages (Dokploy 拉取镜像用)
+   - `write:packages` - 写入 packages (CI 推送镜像用，会自动获得)
+
+## 触发部署
+
+- **自动触发**：Push 到 `main` 分支
+- **手动触发**：使用 `repository_dispatch` 事件
+
+## 镜像管理
+
+镜像存储在 GHCR 私有仓库：`ghcr.io/<username>/shiroi`
+
+每次构建会生成两个 tag：
+- `latest` - 最新版本
+- `<commit-sha>` - 对应的 commit hash
 
 ## 故障排除
 
-### 容器启动失败
+### 镜像推送失败
 
-1. 检查环境变量文件是否正确配置
-2. 查看容器日志获取错误信息
-3. 确保数据目录权限正确
+1. 检查 `GITHUB_TOKEN` 权限是否包含 `packages:write`
+2. 确认仓库 Settings → Actions → General → Workflow permissions 设置为 "Read and write permissions"
 
-### 镜像构建失败
+### Dokploy 部署失败
 
-1. 检查 GitHub Token 权限
-2. 确认 Shiroi 仓库中存在 Dockerfile
-3. 查看 GitHub Actions 日志
+1. 检查 `DOKPLOY_URL` 是否正确（不带尾部斜杠）
+2. 确认 `DOKPLOY_API_TOKEN` 有效
+3. 确认 `DOKPLOY_APP_ID` 正确
+4. 检查 Dokploy 中的 Registry 凭证是否正确
 
-### 部署失败
+### Dokploy 拉取镜像失败
 
-1. 检查服务器 SSH 连接
-2. 确认 Docker 服务正在运行
-3. 检查磁盘空间是否充足
+1. 确认 Dokploy 中配置的 Registry 凭证正确
+2. 确认 PAT 有 `read:packages` 权限
+3. 检查镜像地址是否正确：`ghcr.io/<username>/shiroi:latest`
